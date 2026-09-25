@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "voicelab"
 version = "0.1.0"
-description = "音声エージェントの構成を、プロバイダ（ElevenLabs と Deepgram）をまたいで遅延・費用・実装量で比べる実験場"
+description = "日本語の音声エージェントを、TTS 4 社（ElevenLabs / Deepgram / OpenAI / Google）と任せる範囲を変えて、遅延・費用・実装量で比べる実験場"
 readme = "README.md"
 requires-python = ">=3.11"
 # 骨組み（credits / report）は標準ライブラリだけで動かす。

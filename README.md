@@ -1,33 +1,100 @@
 # voicelab
 
-同じ音声エージェントを**構成とプロバイダを変えて作って比べる**ための実験場。「どの構成をいつ選ぶか」を、
-数字で言えるようにするのが目的。
+日本語で話す音声エージェント（声で質問して、手元のノートを根拠に声で答える）を、
+**どの社の部品で、どこまで任せて作ると、どれだけ速く・安くなるか**を実測で比べる実験場。
+同じ質問 5 問・同じ題材・同じ LLM（Gemini）で流し、違いを 1 か所に絞って数字を並べる。
 
-比べる軸は 2 つある（2026-09-25 に組み直した）。
+問いは 2 つ。
 
-1. **構成**（何を ElevenLabs に任せるか）
-   - **A: Agents Platform** … ElevenLabs の Agent（音声認識・応答生成・発話・割り込みを丸ごと任せる）。ノートは手元に置き、Agent が道具（client tool）で引く
-   - **B: 自前構成** … 自前の検索 + Gemini + ストリーミング TTS を自分でつなぐ。ノートは手元に置き、LLM に選ばせず先に引く
-   - **C: Knowledge Base** … ノートの本文を **ElevenLabs 側にアップロードして預け**、向こうの RAG で引かせる。道具は持たせない
-2. **B の TTS プロバイダ**（B の発話だけを差し替える）… **ElevenLabs**（既定）/ **Deepgram** / **OpenAI** / **Google**。
-   検索・prompt・Gemini の呼び方・時刻の打ち方は同じ関数を通るので、差は TTS だけに絞れる
-
-文中では「B（Deepgram）」のように書く。以前の「D: Deepgram 構成」は B（Deepgram）のこと。
-書き起こしの「構成:」の行は記号のままで、**B = ElevenLabs、D = Deepgram、E = OpenAI、F = Google**。
+1. **音声合成（TTS）をどの社にするか** … 検索と LLM を固定した自前のパイプライン（構成 B）で、
+   TTS だけを **ElevenLabs / Deepgram / OpenAI / Google** の 4 社で差し替える。
+   検索・prompt・Gemini の呼び方・時刻の打ち方は同じ関数を通るので、差は TTS だけになる
+2. **どこまでプラットフォームに任せるか** … 音声認識・応答生成・発話を丸ごと任せる構成（A）、
+   ノートまで預ける構成（C）と、自分でつなぐ B を比べる。任せる先は今のところ
+   ElevenLabs Agents Platform だけで測っている（他社の同種のサービスはまだ）
 
 比べる観点は 3 つ。
 
 | 観点 | 測り方 |
 |---|---|
 | 遅延 | 質問を投げてから最初の音が出るまで（ms）。自前で計る（[計測の定義](#計測の定義)） |
-| 費用 | 1 往復あたり。A と C は会話ごとの `cost`（クレジット）、B は TTS の文字数（ElevenLabs はクレジット、他社はドル）。`usd` 列で会社をまたいで並べる |
+| 費用 | 1 往復あたりのドル（各社の定価から見積もり、`usd` 列）。ElevenLabs の会話課金はクレジットでも残す |
 | 実装量 | 行数と、自分で面倒を見る必要があるものの数（割り込み、無音判定、再接続…） |
 
-数字の比較は `COMPARISON.md`、ElevenLabs の作りは `ARCHITECTURE.md`、日本語で効いたことは `FINDINGS_JA.md`。
+数字の比較は `COMPARISON.md`、各社の口の違いと ElevenLabs の作りは `ARCHITECTURE.md`、
+日本語の声で効いたことは `FINDINGS_JA.md`。
 
-## 3 つの構成
+書き起こしの「構成:」の行は記号で、**B = ElevenLabs、D = Deepgram、E = OpenAI、F = Google**
+（以前の「D: Deepgram 構成」は、今の書き方では B（Deepgram））。
 
-**何を ElevenLabs に渡し、何を手元に置くか**が構成の正体で、遅延も費用も運用の面倒さも
+## TTS 4 社の比較（構成 B）
+
+B の TTS だけを差し替える。1 往復の流し方・時刻の打ち方・書き起こしの並びは全社で同じ関数を通るので、
+片方だけ直って数字が並べられなくなる事故が起きない。依存は増やしていない（各社の SDK は入れず、
+ElevenLabs は `websockets`、他社は既存の `httpx` で叩く）。
+
+| | ElevenLabs | Deepgram | OpenAI | Google |
+|---|---|---|---|---|
+| モジュール | `custom_path.py` | `deepgram_path.py` | `openai_path.py` | `google_path.py` |
+| 口 | `stream-input`（WebSocket。1 本の接続に文を流し込む） | `POST /v1/speak`（REST） | `POST /v1/audio/speech`（REST） | `POST /v1/text:synthesize`（REST） |
+| 1 文ごと | 同じ接続に送る | 1 文 1 リクエスト、応答をストリーミングで読む | 1 文 1 リクエスト、chunked で読む | 1 文 1 リクエスト、**1 文ぶんをまとめて**受ける（ストリーミングは gRPC だけ） |
+| 既定のモデル / 声 | `.env` の `VOICELAB_TTS_MODEL`（空なら `ELEVENLABS_MODEL_ID`）/ Jessica | `aura-2-izanami-ja`（声とモデルが 1 つの id） | `gpt-4o-mini-tts` / `marin` | `ja-JP-Chirp3-HD-Kore`（声の名前がモデルを兼ねる） |
+| 日本語の声 | 検証済みの premade と共有音声（`FINDINGS_JA.md`） | Aura-2 の 5 声 | 組み込み 13 声（日本語専用は無い） | Chirp 3 HD の 30 声 |
+| 出力 | `pcm_16000` | `linear16` / 16kHz / `container=none` | `pcm` / **24kHz**（変換せず残す） | `LINEAR16` / 16kHz（先頭 44 バイトの WAV ヘッダを落とす） |
+| 課金 | 文字数（クレジット。Flash / Turbo は $0.05 / 1,000 字相当） | 文字数（Aura-2 PAYG $0.030 / 1,000 字） | **トークン**（音 1 分 $0.015 の推定で換算） | 文字数（Chirp 3 HD $0.030 / 1,000 字、**月 100 万字まで無料**） |
+| 残高（`credits`） | 読める。`MIN_CREDITS` 未満なら止まる | `billing:read` があれば読める。止まらない。402 なら記録せずに止まる | API では読めない（usage ダッシュボード） | API では読めない（Cloud Console） |
+| 書き起こしの記号 | B | D | E | F |
+
+価格は各モジュールの定数の注記に出典と確認日（2026-09-25）がある。**`usd` 列はどれも見積り**で、
+正は各社の請求の画面。
+
+REST の 3 社は「1 本の接続に文を流し込む」口が無いので、文ごとにリクエストを投げる。LLM の生成を
+止めないよう、`send()` は文を列に積むだけで戻り、別スレッドが**文の順に 1 本ずつ**投げて音を受ける
+（順番を崩さないため、2 文目は 1 文目の音を受け終わってから投げる）。`t0` の前に課金の無い GET を 1 回投げて、
+TCP と TLS を張っておく。
+
+### 結果（5 問を 1 回ずつ。中央値）
+
+同じ 5 問・同じ検索・同じ prompt・同じ Gemini（`gemini-3.6-flash`）。ElevenLabs は `eleven_turbo_v2_5`（2026-09-11）、
+他の 3 社は 2026-09-25。質問ごとの表と読み方は `COMPARISON.md`。
+
+| | ElevenLabs | Deepgram | OpenAI | Google |
+|---|---:|---:|---:|---:|
+| 最初の音まで | 3,796 ms | **3,462 ms** | 4,640 ms | 3,897 ms |
+| TTS 区間 | 443 ms | **211 ms** | 1,200 ms | 1,386 ms |
+| 言い終わりまで（並べて読まない） | 3,969 ms | 10,570 ms | 7,808 ms | 5,296 ms |
+| 1 往復のドル（平均） | $0.0045 | $0.0029 | $0.0041 | **$0.0027** |
+
+- **TTS 区間は Deepgram が一番短く、ElevenLabs が次**。OpenAI は最初のバイトが遅く、Google は 1 文ぶんの合成が
+  終わるまで何も届かない（届け方の違いが数字に乗っている）
+- **体感の遅延の大半は、どの社でも Gemini の最初のトークン**（2.1〜7.0 秒）。TTS を替えても 1 秒単位では速くならない
+- 揃っていない条件: 声が社ごとに違う、ElevenLabs だけ 2 週間前に測った、読みの品質はまだ耳で比べていない
+
+## プロバイダを足す手順
+
+`voicelab/tts_path.py` の説明に同じ手順がある。見本は `voicelab/deepgram_path.py`（REST の社は 1 社 360〜460 行）。
+
+1. `voicelab/<社>_path.py` を作り、TTS のクラスを書く。`custom_path.TtsStream` を満たし（`send` で文を積む、
+   `finish` / `wait` / `close`、`sent_sentences` / `sent_chars` / `first_send_at`）、`with` で開けるようにする
+   （`__enter__` で接続を温める）。音は `custom_path.AudioSink` に入れ、失敗は `error` に残す
+2. `tts_path.TtsSpec` を 1 つ作る。構成キー（`path`。**一度決めたら綴りを変えない**）、`results/` の会社の段、
+   書き起こしの記号、鍵とモデルの `.env` キー名、既定のモデル、出力の形とサンプルレート、料金の換算
+   （文字数課金なら `tts_path.usd_per_chars`）、残高切れの見分け方
+3. `run_scenario` と `describe_dry_run` は `tts_path` の同名の関数に `SPEC` を渡すだけにする
+4. `tts_provider.register(TtsProvider(...))` で登録する。`key`・表示名・表の見出し（`B: 自前構成（<社>）`）・
+   `required_env`・残高を 1 行で返す関数（読めないならそう言う文でよい）
+5. `voicelab/cli.py` の import と `PROVIDER_MODULES` にモジュールを足す（import されないと登録されず、`--tts` に出ない）
+6. `.env.example` に鍵とモデルの行を、`voicelab/config.py` の `ENV_KEYS` にキー名を足す
+7. `tests/test_<社>_path.py` を足す（既存の社のテストが見本。通信はダミーに差し替える）
+8. `python run.py run custom --tts <社> --dry-run` で確かめてから、1 問だけ流す
+
+`runs.csv` の列、`report` の表、`credits` の表示は登録簿から引くので触らなくてよい。
+
+## 任せる範囲の比較（構成 A / B / C）
+
+A と C は ElevenLabs Agents Platform の上に作った。B は各部品を自分でつなぐ。
+
+**何をプラットフォームに渡し、何を手元に置くか**が構成の正体で、遅延も費用も運用の面倒さも
 そこから出てくる。
 
 | | A: Agents Platform | B: 自前構成 | C: Knowledge Base |
@@ -36,7 +103,7 @@
 | 検索の実装 | **手元**（`search.py` を道具として呼ばれる） | **手元**（`search.py` を先に呼ぶ） | **ElevenLabs 側**（内部の RAG） |
 | 検索を呼ぶ判断 | LLM（道具を選ぶ） | こちら（毎回必ず引く） | ElevenLabs 側（`usage_mode: auto`） |
 | LLM の呼び出し | **ElevenLabs 側** | **自分**（Gemini API） | **ElevenLabs 側** |
-| 音声（TTS） | ElevenLabs 側 | 自分でつなぐ（[4 社から選ぶ](#b-の-tts-プロバイダ)） | ElevenLabs 側 |
+| 音声（TTS） | ElevenLabs 側 | 自分でつなぐ（[4 社から選ぶ](#tts-4-社の比較構成-b)） | ElevenLabs 側 |
 | Agent が持つ道具 | `search_notes` 1 つ | なし（Agent を使わない） | **なし** |
 | ツール往復 | **あり**（実測 1.5〜2 秒） | なし | なし |
 | ノートを直したとき | そのまま反映される | そのまま反映される | **`setup-kb` で同期が要る** |
@@ -389,69 +456,6 @@ B（ElevenLabs）の `credits` 列には **TTS に送った文字数 × 0.5** �
 **Gemini の費用は TTS の費用に混ぜない。** トークン数として書き起こしに残す。
 A ではこの分が会話の `cost` に溶けていて分けられない ―― そこも B との違い。
 
-## B の TTS プロバイダ
-
-B の TTS だけを差し替える。1 往復の流し方・時刻の打ち方・書き起こしの並びは全社で同じ関数を通るので、
-片方だけ直って数字が並べられなくなる事故が起きない。依存は増やしていない（各社の SDK は入れず、
-ElevenLabs は `websockets`、他社は既存の `httpx` で叩く）。
-
-| | ElevenLabs | Deepgram | OpenAI | Google |
-|---|---|---|---|---|
-| モジュール | `custom_path.py` | `deepgram_path.py` | `openai_path.py` | `google_path.py` |
-| 口 | `stream-input`（WebSocket。1 本の接続に文を流し込む） | `POST /v1/speak`（REST） | `POST /v1/audio/speech`（REST） | `POST /v1/text:synthesize`（REST） |
-| 1 文ごと | 同じ接続に送る | 1 文 1 リクエスト、応答をストリーミングで読む | 1 文 1 リクエスト、chunked で読む | 1 文 1 リクエスト、**1 文ぶんをまとめて**受ける（ストリーミングは gRPC だけ） |
-| 既定のモデル / 声 | `.env` の `VOICELAB_TTS_MODEL`（空なら `ELEVENLABS_MODEL_ID`）/ Jessica | `aura-2-izanami-ja`（声とモデルが 1 つの id） | `gpt-4o-mini-tts` / `marin` | `ja-JP-Chirp3-HD-Kore`（声の名前がモデルを兼ねる） |
-| 日本語の声 | 検証済みの premade と共有音声（`FINDINGS_JA.md`） | Aura-2 の 5 声 | 組み込み 13 声（日本語専用は無い） | Chirp 3 HD の 30 声 |
-| 出力 | `pcm_16000` | `linear16` / 16kHz / `container=none` | `pcm` / **24kHz**（変換せず残す） | `LINEAR16` / 16kHz（先頭 44 バイトの WAV ヘッダを落とす） |
-| 課金 | 文字数（クレジット。Flash / Turbo は $0.05 / 1,000 字相当） | 文字数（Aura-2 PAYG $0.030 / 1,000 字） | **トークン**（音 1 分 $0.015 の推定で換算） | 文字数（Chirp 3 HD $0.030 / 1,000 字、**月 100 万字まで無料**） |
-| 残高（`credits`） | 読める。`MIN_CREDITS` 未満なら止まる | `billing:read` があれば読める。止まらない。402 なら記録せずに止まる | API では読めない（usage ダッシュボード） | API では読めない（Cloud Console） |
-| 書き起こしの記号 | B | D | E | F |
-
-価格は各モジュールの定数の注記に出典と確認日（2026-09-25）がある。**`usd` 列はどれも見積り**で、
-正は各社の請求の画面。
-
-REST の 3 社は「1 本の接続に文を流し込む」口が無いので、文ごとにリクエストを投げる。LLM の生成を
-止めないよう、`send()` は文を列に積むだけで戻り、別スレッドが**文の順に 1 本ずつ**投げて音を受ける
-（順番を崩さないため、2 文目は 1 文目の音を受け終わってから投げる）。`t0` の前に課金の無い GET を 1 回投げて、
-TCP と TLS を張っておく。
-
-### 結果（5 問を 1 回ずつ。中央値）
-
-同じ 5 問・同じ検索・同じ prompt・同じ Gemini（`gemini-3.6-flash`）。ElevenLabs は `eleven_turbo_v2_5`（2026-09-11）、
-他の 3 社は 2026-09-25。質問ごとの表と読み方は `COMPARISON.md`。
-
-| | ElevenLabs | Deepgram | OpenAI | Google |
-|---|---:|---:|---:|---:|
-| 最初の音まで | 3,796 ms | **3,462 ms** | 4,640 ms | 3,897 ms |
-| TTS 区間 | 443 ms | **211 ms** | 1,200 ms | 1,386 ms |
-| 言い終わりまで（並べて読まない） | 3,969 ms | 10,570 ms | 7,808 ms | 5,296 ms |
-| 1 往復のドル（平均） | $0.0045 | $0.0029 | $0.0041 | **$0.0027** |
-
-- **TTS 区間は Deepgram が一番短く、ElevenLabs が次**。OpenAI は最初のバイトが遅く、Google は 1 文ぶんの合成が
-  終わるまで何も届かない（届け方の違いが数字に乗っている）
-- **体感の遅延の大半は、どの社でも Gemini の最初のトークン**（2.1〜7.0 秒）。TTS を替えても 1 秒単位では速くならない
-- 揃っていない条件: 声が社ごとに違う、ElevenLabs だけ 2 週間前に測った、読みの品質はまだ耳で比べていない
-
-## プロバイダを足す手順
-
-`voicelab/tts_path.py` の説明に同じ手順がある。見本は `voicelab/deepgram_path.py`（REST の社は 1 社 360〜460 行）。
-
-1. `voicelab/<社>_path.py` を作り、TTS のクラスを書く。`custom_path.TtsStream` を満たし（`send` で文を積む、
-   `finish` / `wait` / `close`、`sent_sentences` / `sent_chars` / `first_send_at`）、`with` で開けるようにする
-   （`__enter__` で接続を温める）。音は `custom_path.AudioSink` に入れ、失敗は `error` に残す
-2. `tts_path.TtsSpec` を 1 つ作る。構成キー（`path`。**一度決めたら綴りを変えない**）、`results/` の会社の段、
-   書き起こしの記号、鍵とモデルの `.env` キー名、既定のモデル、出力の形とサンプルレート、料金の換算
-   （文字数課金なら `tts_path.usd_per_chars`）、残高切れの見分け方
-3. `run_scenario` と `describe_dry_run` は `tts_path` の同名の関数に `SPEC` を渡すだけにする
-4. `tts_provider.register(TtsProvider(...))` で登録する。`key`・表示名・表の見出し（`B: 自前構成（<社>）`）・
-   `required_env`・残高を 1 行で返す関数（読めないならそう言う文でよい）
-5. `voicelab/cli.py` の import と `PROVIDER_MODULES` にモジュールを足す（import されないと登録されず、`--tts` に出ない）
-6. `.env.example` に鍵とモデルの行を、`voicelab/config.py` の `ENV_KEYS` にキー名を足す
-7. `tests/test_<社>_path.py` を足す（既存の社のテストが見本。通信はダミーに差し替える）
-8. `python run.py run custom --tts <社> --dry-run` で確かめてから、1 問だけ流す
-
-`runs.csv` の列、`report` の表、`credits` の表示は登録簿から引くので触らなくてよい。
-
 ## A の最初の結果（2026-09-11、gemini-2.5-flash の頃）
 
 全行は `results/runs.csv`。音声は `results/elevenlabs/agents-platform/audio/`（git には入れない）。
@@ -505,7 +509,7 @@ TCP と TLS を張っておく。
 - B の「たどたどしさ」は文ごとに TTS へ送る作りに由来する可能性がある。同じ文を flash_v2_5 と multilingual_v2 で一括合成した比較が `model-sample_*.wav`
 - 2026-09-11 16:30 UTC 以降の `runs.csv` の行は Jessica。それ以前は Sarah。18:00 UTC 以降の A は正規化 `elevenlabs`
 
-## 日本語で使う人へ（つまずいた点と対処）
+## ElevenLabs を日本語で使う人へ（つまずいた点と対処）
 
 この repo を見て ElevenLabs を日本語で使おうとしている人へ。
 **実測して分かったことは `FINDINGS_JA.md` にまとめた。** 要点だけ先に書く。
