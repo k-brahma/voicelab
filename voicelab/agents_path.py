@@ -33,7 +33,7 @@ from elevenlabs.conversational_ai.conversation import AudioInterface, ClientTool
 
 from . import search
 from .agent_setup import API_BASE, TOOL_NAME
-from .config import AUDIO_DIR, TRANSCRIPTS_DIR, load_env, require
+from .config import AUDIO_DIR, COMPANY_ELEVENLABS, MODEL_AGENTS_PLATFORM, TRANSCRIPTS_DIR, load_env, require, result_dirs
 from .metrics import PATH_AGENTS, Run
 
 #: 最初の音が来てからこれだけ途切れたら「言い終わった」とみなす。
@@ -265,20 +265,23 @@ def save_audio_file(
     directory: Path = AUDIO_DIR,
     *,
     label: str = PATH_AGENTS,
+    sample_rate: int = SAMPLE_RATE,
 ) -> Path:
-    """届いた PCM を WAV にする（16kHz / 16bit / mono）。
+    """届いた PCM を WAV にする（既定は 16kHz / 16bit / mono）。
 
     正誤は**人が聞いて**判定する決まりなので、音は捨てずに残す。
 
-    ``label`` は名前に入れる構成名（``agents`` / ``custom``）。**B も同じ関数を使う**。
+    ``label`` は名前に入れる構成名（``agents`` / ``custom`` / ``deepgram`` …）。**B も同じ関数を使う**。
     形式や置き場所が構成ごとに違うと、並べて聞いたときに比べられなくなるため。
+    ``sample_rate`` は 16kHz 以外しか返さない TTS（OpenAI は 24kHz）のためにある。
+    変換せずそのまま書く。
     """
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f'{scenario_id}_{label}_{stamp}.wav'
     with wave.open(str(path), 'wb') as handle:
         handle.setnchannels(CHANNELS)
         handle.setsampwidth(SAMPLE_WIDTH)
-        handle.setframerate(SAMPLE_RATE)
+        handle.setframerate(sample_rate)
         handle.writeframes(pcm)
     return path
 
@@ -460,8 +463,9 @@ def run_scenario(
     )
 
     stamp = utc_stamp()
+    dirs = result_dirs(COMPANY_ELEVENLABS, MODEL_AGENTS_PLATFORM)
     if save_audio and audio.chunks:
-        save_audio_file(audio.pcm(), scenario['id'], stamp)
+        save_audio_file(audio.pcm(), scenario['id'], stamp, dirs.audio)
     save_transcript(
         render_transcript(
             scenario,
@@ -475,11 +479,13 @@ def run_scenario(
         ),
         scenario['id'],
         stamp,
+        dirs.transcripts,
     )
 
     return Run(
         scenario_id=scenario['id'],
         path=PATH_AGENTS,
+        model=MODEL_AGENTS_PLATFORM,
         first_audio_ms=first_audio_ms,
         reply_done_ms=reply_done_ms,
         credits=credits_used or 0,

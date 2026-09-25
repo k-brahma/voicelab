@@ -1,6 +1,6 @@
 # 日本語で ElevenLabs を使うときに効いたこと
 
-2026-09-11 に実測して分かったことだけを書く。**推測は「未確認」と明示する。**
+2026-09-11 に実測して分かったことだけを書く（8 だけ 2026-09-25）。**推測は「未確認」と明示する。**
 数字の出どころは `results/` の CSV と音声、手順は各モジュールの docstring。
 
 対象は Text to Speech と Agents Platform。日本語での利用を前提にしている。
@@ -210,6 +210,25 @@ ratio = difflib.SequenceMatcher(None, 正規化(原稿), 正規化(heard)).ratio
 
 したがって**この数値は下限の目安**であり、最終判断は耳で行う。
 ただし「全部の声で同じ語が崩れる」のような**傾向の検出**には十分使える。
+
+---
+
+## 8. 比較: 他社の TTS で使える日本語の声
+
+B（自前構成）の TTS を 4 社で替えて測った（2026-09-25、`COMPARISON.md`）。声の選択肢は社ごとに大きく違う。
+一覧は各社の API か公式ガイドで 2026-09-25 に確かめた。
+
+| 社 | 日本語の声 | 確かめ方 | この lab の既定 |
+|---|---|---|---|
+| ElevenLabs | premade のうち日本語が検証済みなのは George / Alice / Jessica。日本語ネイティブの共有音声（Koji・Takuya・Tsuyuri など）もある。ネイティブの「Aya」は Starter 以上 | `GET /v1/voices` の `verified_languages` | Jessica |
+| Deepgram | **Aura-2 の 5 声だけ**。女性 `aura-2-izanami-ja` / `aura-2-uzume-ja` / `aura-2-ama-ja`、男性 `aura-2-fujin-ja` / `aura-2-ebisu-ja`。旧 Aura は英語のみ、Flux の TTS は一覧に無い | `GET /v1/models` の `languages` | `aura-2-izanami-ja` |
+| OpenAI | 組み込み 13 声（alloy / ash / ballad / coral / echo / fable / nova / onyx / sage / shimmer / verse / marin / cedar）。**日本語専用の声は無く**、どの声も多言語で話す。音質で推されているのは marin と cedar | 公式の TTS ガイド | `marin` |
+| Google | **Chirp 3 HD の 30 声**（女性 14・男性 16）。名前は `ja-JP-Chirp3-HD-<名>`。ja-JP 全体では 41 声 | `GET /v1/voices?languageCode=ja-JP` | `ja-JP-Chirp3-HD-Kore` |
+
+- 声の一覧と既定を選んだ理由は `.env.example` と各モジュールの説明（`deepgram_path.py` / `openai_path.py` / `google_path.py`）にある
+- ElevenLabs で分かったこと（1〜4）は「**読み違いは声ではなくモデルで決まる**」だった。他社でも同じかは**未確認**
+- 他社の読みの品質（漢字の読み違い、数字、英字略語）は**まだ比べていない**。上の 7 の検査（Scribe で書き起こして
+  突き合わせる）を各社の録音（`results/<会社>/<モデル>/audio/`）にかけるのが次の一手
 
 ---
 

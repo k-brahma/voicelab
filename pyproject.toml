@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "voicelab"
 version = "0.1.0"
-description = "ElevenLabs Agents Platform と自前構成を、遅延・費用・実装量で比べる実験場"
+description = "音声エージェントの構成を、プロバイダ（ElevenLabs と Deepgram）をまたいで遅延・費用・実装量で比べる実験場"
 readme = "README.md"
 requires-python = ">=3.11"
 # 骨組み（credits / report）は標準ライブラリだけで動かす。
@@ -15,7 +15,8 @@ dependencies = [
     "elevenlabs>=2.67.0",
     # B: 応答生成。A は同じモデルを ElevenLabs 側で動かすので、これは B のためだけ
     "google-genai>=2.22.0",
-    # ElevenLabs の REST を直接叩く（残高・ツール・Agent・会話の費用）。
+    # ElevenLabs と Deepgram（D の TTS と残高）の REST を直接叩く（残高・ツール・Agent・会話の費用）。
+    # D のために deepgram-sdk は入れていない
     # elevenlabs の依存でもあるが、こちらが直接 import するので明示しておく
     "httpx>=0.28",
     # B: TTS の stream-input に直接つなぐ。elevenlabs の依存でもあるが、

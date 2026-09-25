@@ -32,7 +32,9 @@ from websockets.sync.client import connect as ws_connect
 
 from . import search
 from .agents_path import audio_window_ms, elapsed_ms, save_audio_file, save_transcript
-from .config import AGENT_PROMPT_PATH, DEFAULT_LLM, load_env, require
+from .config import AGENT_PROMPT_PATH, COMPANY_ELEVENLABS, DEFAULT_LLM, load_env, require, result_dirs
+from . import credits as credits_api
+from . import tts_provider
 from .metrics import PATH_CUSTOM, Run
 
 #: 文の切れ目。ここで切って TTS に送る。
@@ -79,6 +81,16 @@ TTS_DONE_TIMEOUT_SECONDS = 60.0
 #: これは**見積り**。正は実行前後の残高の差（``voicelab credits``）で、ずれたらここを直す。
 #: 残高への反映は遅れるので、1 回の実行では合わないことがある（README の「最初の結果」を参照）。
 CREDITS_PER_CHARACTER = 0.5
+
+#: ElevenLabs の TTS を **ドルに換算するときの単価**（Flash / Turbo の API 定価、1,000 文字あたり）。
+#: 他社（Deepgram / OpenAI / Google …）と同じ単位で並べるためのもので、契約プランの実勢
+#: （Starter は $5 / 30,000 クレジット）とは違う。出典は上と同じ https://elevenlabs.io/pricing/api
+USD_PER_1K_CHARS = 0.05
+
+
+def estimate_usd(sent_chars: int) -> float:
+    """TTS に送った文字数からドルを見積もる（API 定価）。"""
+    return sent_chars * USD_PER_1K_CHARS / 1000
 
 #: A の指示のうち、B では意味を成さない行の目印。B に道具は無く、検索はもう済んでいる。
 TOOL_LINE_MARKER = 'search_notes'
@@ -223,6 +235,11 @@ class TtsStream(Protocol):
     def wait(self, timeout: float) -> bool: ...
 
     def close(self) -> None: ...
+
+    # run_pipeline は ``with tts:`` で開く（開くのは t0 より前）
+    def __enter__(self) -> 'TtsStream': ...
+
+    def __exit__(self, *_exc) -> None: ...
 
 
 class WebSocketTts:
@@ -552,12 +569,36 @@ def render_transcript(scenario: dict, turn: Turn, *, voice_id: str, model_id: st
 
     CSV には入らない**内訳**（検索・LLM・TTS の各段と Gemini のトークン）はここにしか無い。
     A と B のどちらが速いかではなく、**どこで時間を使っているか**を見るための行。
+
+    節の並びは :func:`render_turn_transcript` が持つ。ここで決めるのは B に固有の 2 か所
+    （構成の行と、ElevenLabs のクレジットの見積り）だけ。
+    """
+    return render_turn_transcript(
+        scenario,
+        turn,
+        config_line=f'B（検索 → {llm} → ElevenLabs {model_id} / 声 {voice_id}）',
+        tts_cost_line=(
+            f'- ElevenLabs クレジット（見積り）: {turn.credits}'
+            f'（{turn.sent_chars} 字 × {CREDITS_PER_CHARACTER}）'
+        ),
+        audio_format=OUTPUT_FORMAT,
+    )
+
+
+def render_turn_transcript(
+    scenario: dict, turn: Turn, *, config_line: str, tts_cost_line: str, audio_format: str
+) -> str:
+    """B と D が共有する書き起こしの本体。
+
+    D（:mod:`voicelab.deepgram_path`）は TTS だけを差し替えた構成なので、節の並び
+    （検索・返答・送った文・時刻・費用・その他）は B と**同じ**にしておく。
+    違うのは「構成」の行と「TTS の費用」の行だけで、呼び出し側が渡す。
     """
     usage = turn.usage
     lines = [
         f'質問: {turn.question}（{scenario["id"]}）',
         f'期待するノート: {scenario.get("expected_note")}',
-        f'構成: B（検索 → {llm} → ElevenLabs {model_id} / 声 {voice_id}）',
+        f'構成: {config_line}',
         '',
         '## 検索（LLM に選ばせず先に実行）',
     ]
@@ -585,8 +626,7 @@ def render_transcript(scenario: dict, turn: Turn, *, voice_id: str, model_id: st
         '',
         '## 費用',
         f'- TTS に送った文: {len(turn.sentences)} 本 / {turn.sent_chars} 文字',
-        f'- ElevenLabs クレジット（見積り）: {turn.credits}'
-        f'（{turn.sent_chars} 字 × {CREDITS_PER_CHARACTER}）',
+        tts_cost_line,
         f'- Gemini トークン: 入力 {usage.get("prompt_token_count", "?")}'
         f' / 出力 {usage.get("candidates_token_count", "?")}'
         f' / 思考 {usage.get("thoughts_token_count", 0)}'
@@ -594,7 +634,7 @@ def render_transcript(scenario: dict, turn: Turn, *, voice_id: str, model_id: st
         '（ElevenLabs のクレジットではない。credits 列には入れない）',
         '',
         '## その他',
-        f'- 音声: {len(turn.pcm):,} バイト（{OUTPUT_FORMAT}）',
+        f'- 音声: {len(turn.pcm):,} バイト（{audio_format}）',
         f'- タイムアウト: {"あり" if turn.timed_out else "なし"}',
         f'- TTS エラー: {turn.error or "なし"}',
     ]
@@ -634,6 +674,37 @@ def describe_dry_run(scenario: dict, env: dict[str, str] | None = None) -> str:
     return '\n'.join(lines)
 
 
+def run_pipeline(
+    question: str, *, tts, sink: AudioSink, gemini_key: str, llm: str
+) -> Turn:
+    """TTS を開いてから ``t0`` を打ち、検索 → Gemini → TTS を 1 往復流す。
+
+    **B と D の共通部分**。D（:mod:`voicelab.deepgram_path`）は TTS だけを差し替えた構成で、
+    ``t0`` の打ち方・検索・Gemini の呼び方がずれると数字を並べられなくなるので、
+    ここを 1 か所にしてある。``tts`` は :class:`TtsStream` を満たし、``with`` で
+    開いて閉じられるもの（開くのは ``t0`` より**前**）。
+    """
+    with tts:
+        t0 = time.perf_counter()
+        hits = search.search(question)
+        search_done_at = time.perf_counter()
+        chunks = stream_gemini(
+            question,
+            build_system_prompt(hits),
+            api_key=gemini_key,
+            model=llm,
+        )
+        return run_turn(
+            question,
+            hits=hits,
+            llm_chunks=chunks,
+            tts=tts,
+            sink=sink,
+            t0=t0,
+            search_done_at=search_done_at,
+        )
+
+
 def run_scenario(scenario: dict, *, save_audio: bool = True, env: dict[str, str] | None = None) -> Run:
     """質問を 1 つ投げて 1 往復し、:class:`voicelab.metrics.Run` を返す。
 
@@ -657,33 +728,17 @@ def run_scenario(scenario: dict, *, save_audio: bool = True, env: dict[str, str]
     tts = WebSocketTts(
         api_key=api_key, voice_id=voice_id, model_id=model_id, sink=sink
     )
-    with tts:
-        t0 = time.perf_counter()
-        hits = search.search(scenario['text'])
-        search_done_at = time.perf_counter()
-        chunks = stream_gemini(
-            scenario['text'],
-            build_system_prompt(hits),
-            api_key=gemini_key,
-            model=llm,
-        )
-        turn = run_turn(
-            scenario['text'],
-            hits=hits,
-            llm_chunks=chunks,
-            tts=tts,
-            sink=sink,
-            t0=t0,
-            search_done_at=search_done_at,
-        )
+    turn = run_pipeline(scenario['text'], tts=tts, sink=sink, gemini_key=gemini_key, llm=llm)
 
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    dirs = result_dirs(COMPANY_ELEVENLABS, model_id)
     if save_audio and turn.pcm:
-        save_audio_file(turn.pcm, scenario['id'], stamp, label=PATH_CUSTOM)
+        save_audio_file(turn.pcm, scenario['id'], stamp, dirs.audio, label=PATH_CUSTOM)
     save_transcript(
         render_transcript(scenario, turn, voice_id=voice_id, model_id=model_id, llm=llm),
         scenario['id'],
         stamp,
+        dirs.transcripts,
         label=PATH_CUSTOM,
     )
 
@@ -693,23 +748,61 @@ def run_scenario(scenario: dict, *, save_audio: bool = True, env: dict[str, str]
         first_audio_ms=turn.first_audio_ms,
         reply_done_ms=turn.reply_done_ms,
         credits=turn.credits,
+        usd=round(estimate_usd(turn.sent_chars), 6),
+        model=dirs.model,
         correct=None,  # 人が音を聞いて判定する
         note=build_note(scenario, turn),
     )
 
 
+def describe_balance(env: dict[str, str]) -> str:
+    """ElevenLabs の残クレジットを 1 行で。読めなければその旨（止まらない）。"""
+    try:
+        return credits_api.read_subscription(env['ELEVENLABS_API_KEY']).describe()
+    except KeyError:
+        return 'ElevenLabs: 鍵 ELEVENLABS_API_KEY が未設定'
+    except credits_api.CreditsError as exc:
+        return f'ElevenLabs: 残高は確かめられませんでした（{exc}）'
+
+
+#: B の既定の TTS（ElevenLabs）を登録簿に載せる。``run custom``（``--tts elevenlabs`` 省略時）はこれ。
+#: ``key`` が ``custom`` なのは、CSV の ``path`` 列の綴りを 2026-09-11 の行から変えないため。
+PROVIDER = tts_provider.register(
+    tts_provider.TtsProvider(
+        key=PATH_CUSTOM,
+        name='ElevenLabs',
+        label='B: 自前構成（ElevenLabs）',
+        required_env=('ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_ID', 'GEMINI_API_KEY'),
+        run_scenario=run_scenario,
+        describe_dry_run=describe_dry_run,
+        describe_balance=describe_balance,
+        uses_elevenlabs_credits=True,
+        cost_hint='ElevenLabs クレジット（見積り）',
+        after_run_hints=(
+            'Gemini のトークンは results/elevenlabs/<モデル>/transcripts/ に残している（クレジットとは別勘定）。',
+        ),
+    )
+)
+
+
 __all__ = [
     'AudioSink',
     'CREDITS_PER_CHARACTER',
+    'PROVIDER',
+    'USD_PER_1K_CHARS',
     'CustomPathError',
     'SentenceBuffer',
     'Turn',
     'WebSocketTts',
     'build_note',
     'build_system_prompt',
+    'describe_balance',
     'describe_dry_run',
     'estimate_credits',
+    'estimate_usd',
     'render_transcript',
+    'render_turn_transcript',
+    'run_pipeline',
     'run_scenario',
     'run_turn',
     'split_sentences',

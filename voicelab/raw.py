@@ -19,13 +19,31 @@ from pathlib import Path
 
 import httpx
 
-from .config import RESULTS_DIR
+from .config import (
+    COMPANY_ELEVENLABS,
+    MODEL_AGENTS_PLATFORM,
+    MODEL_KNOWLEDGE_BASE,
+    RESULTS_DIR,
+    load_env,
+    result_dirs,
+)
 
 API_BASE = 'https://api.elevenlabs.io/v1'
 TIMEOUT_SECONDS = 60
 
-#: 落とし先。1 会話 1 ファイル（会話 id がそのままファイル名）。
+#: 旧: 落とし先（2026-09-25 まで）。今は :func:`raw_dir_for` が Agent ごとに決める。
 RAW_DIR = RESULTS_DIR / 'raw'
+
+
+def raw_dir_for(agent_id: str | None, env: dict[str, str] | None = None) -> Path:
+    """会話の JSON を置く ``raw/``。Agent が C（Knowledge Base）のものなら ``knowledge-base``、それ以外は ``agents-platform``。
+
+    1 会話 1 ファイル（会話 id がそのままファイル名）。会社の段は ElevenLabs 固定
+    （会話の生データがあるのは Agents Platform だけ）。
+    """
+    env = load_env() if env is None else env
+    model = MODEL_KNOWLEDGE_BASE if agent_id and agent_id == env.get('ELEVENLABS_KB_AGENT_ID') else MODEL_AGENTS_PLATFORM
+    return result_dirs(COMPANY_ELEVENLABS, model).raw
 
 #: 一覧を引くときの 1 ページの件数。
 PAGE_SIZE = 100
@@ -79,12 +97,15 @@ def fetch_conversation(api_key: str, conversation_id: str) -> dict:
         return _get(client, f'/convai/conversations/{conversation_id}')
 
 
-def save(payload: dict, conversation_id: str, directory: Path = RAW_DIR) -> Path:
+def save(payload: dict, conversation_id: str, directory: Path | None = None) -> Path:
     """生の JSON をそのまま書き出す。既にあれば上書きする。
+
+    ``directory`` を省くと :func:`raw_dir_for` が ``payload['agent_id']`` から決める。
 
     ``ensure_ascii=False`` は日本語を読める形で残すため。``indent=2`` は
     ``git diff`` と目視のため（1 行 JSON だと差分が読めない）。
     """
+    directory = raw_dir_for(payload.get('agent_id')) if directory is None else directory
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f'{conversation_id}.json'
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -113,7 +134,7 @@ def backfill(api_key: str, agent_ids: list[str] | None = None, *, skip_existing:
             conversation_id = item.get('conversation_id')
             if not conversation_id:
                 continue
-            path = RAW_DIR / f'{conversation_id}.json'
+            path = raw_dir_for(item.get('agent_id')) / f'{conversation_id}.json'
             if skip_existing and path.exists():
                 continue
             payload = _get(client, f'/convai/conversations/{conversation_id}')

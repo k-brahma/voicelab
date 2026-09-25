@@ -37,7 +37,7 @@ from .agents_path import (
     wait_for_connection,
     wait_for_reply,
 )
-from .config import load_env, require
+from .config import COMPANY_ELEVENLABS, MODEL_KNOWLEDGE_BASE, load_env, require, result_dirs
 from .kb_setup import KB_AGENT_ID_KEY, KB_AGENT_NAME, RAG_MODEL, corpus_documents, fetch_agent_summary
 from .metrics import PATH_KB, Run
 
@@ -170,8 +170,9 @@ def run_scenario(
     rag_usage = (metadata or {}).get('rag_usage')
 
     stamp = utc_stamp()
+    dirs = result_dirs(COMPANY_ELEVENLABS, MODEL_KNOWLEDGE_BASE)
     if save_audio and audio.chunks:
-        save_audio_file(audio.pcm(), scenario['id'], stamp, label=PATH_KB)
+        save_audio_file(audio.pcm(), scenario['id'], stamp, dirs.audio, label=PATH_KB)
     save_transcript(
         render_transcript(
             scenario,
@@ -187,12 +188,14 @@ def run_scenario(
         ),
         scenario['id'],
         stamp,
+        dirs.transcripts,
         label=PATH_KB,
     )
 
     return Run(
         scenario_id=scenario['id'],
         path=PATH_KB,
+        model=MODEL_KNOWLEDGE_BASE,
         first_audio_ms=first_audio_ms,
         reply_done_ms=reply_done_ms,
         credits=credits_used or 0,

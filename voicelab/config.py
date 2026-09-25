@@ -30,10 +30,49 @@ AGENT_PROMPT_PATH = ROOT / 'prompts' / 'agent_system.txt'
 #: 測った差が prompt の差にならないようにするため。
 KB_PROMPT_PATH = ROOT / 'prompts' / 'agent_system_kb.txt'
 
-#: 会話の録音。あとで聞いて正誤を判定するために残す。
+#: 会社（プロバイダ）とモデルごとの置き場。``results/<会社>/<モデル>/{audio,raw,transcripts}/``。
+#:
+#: 会社をまたいで比べるようになったので（ElevenLabs / Deepgram / OpenAI / Google …）、
+#: 録音・生データ・書き起こしは「どの会社のどのモデルで出したか」で分けて置く。
+#: 表（``runs.csv`` / ``report.md``）だけは ``results/`` 直下に 1 つ。
+#: ElevenLabs の A（Agents Platform）と C（Knowledge Base）は TTS のモデルを自分で選ばない
+#: 構成なので、モデルの段には構成の名前を入れる。
+COMPANY_ELEVENLABS = 'elevenlabs'
+MODEL_AGENTS_PLATFORM = 'agents-platform'  # A
+MODEL_KNOWLEDGE_BASE = 'knowledge-base'  # C
+#: 構成の比較ではない、声やモデルの聞き比べ（``voice-sample_*.wav`` など）の置き場。
+MODEL_SAMPLES = 'samples'
+
+
+def safe_dir_name(name: str) -> str:
+    """モデル名をフォルダ名にする。``/`` と ``:`` だけ ``_`` に変える（他はそのまま）。"""
+    return name.replace('/', '_').replace(':', '_').strip() or 'unknown'
+
+
+class ResultDirs:
+    """1 つの会社・モデルの ``audio`` / ``raw`` / ``transcripts``。作るのは書くときで、ここでは作らない。"""
+
+    def __init__(self, company: str, model: str, root: Path = RESULTS_DIR):
+        self.company = company
+        self.model = safe_dir_name(model)
+        self.base = root / company / self.model
+        self.audio = self.base / 'audio'
+        self.raw = self.base / 'raw'
+        self.transcripts = self.base / 'transcripts'
+
+    def __repr__(self) -> str:
+        return f'ResultDirs({self.company!r}, {self.model!r})'
+
+
+def result_dirs(company: str, model: str) -> ResultDirs:
+    """``results/<会社>/<モデル>/`` の各フォルダ。録音と書き起こしを残すときはこれで場所を決める。"""
+    return ResultDirs(company, model)
+
+
+#: 旧: 会話の録音の置き場（2026-09-25 まで。会社・モデル別に分ける前）。移行スクリプトだけが見る。
 AUDIO_DIR = RESULTS_DIR / 'audio'
 
-#: 返答の本文と時刻。音を聞かなくても何が起きたか追えるようにする。
+#: 旧: 書き起こしの置き場（同上）。
 TRANSCRIPTS_DIR = RESULTS_DIR / 'transcripts'
 
 #: 環境変数からの上書きを許すキー。`.env` に書かれていなくても拾う。
@@ -50,10 +89,25 @@ ENV_KEYS = (
     # B（自前構成）が LLM を自分で呼ぶのに要る。A は ElevenLabs 側で同じモデルを
     # 動かすので鍵は要らない。ここが A と B の費用の出方の違いでもある。
     'GEMINI_API_KEY',
+    # B の TTS を他社に差し替えたときの鍵とモデル。登録は各 *_path モジュール
+    'DEEPGRAM_API_KEY',
+    'DEEPGRAM_TTS_MODEL',
+    'OPENAI_API_KEY',
+    'OPENAI_TTS_MODEL',
+    'OPENAI_TTS_VOICE',
+    'GOOGLE_TTS_API_KEY',
+    'GOOGLE_TTS_VOICE',
 )
 
 #: Agent の応答生成に使う LLM の既定。`.env` の `VOICELAB_LLM` で変えられる。
 DEFAULT_LLM = 'gemini-3.6-flash'
+
+#: B（Deepgram）の TTS モデル（Deepgram では声とモデルが 1 つの id）。`.env` の `DEEPGRAM_TTS_MODEL` で変えられる。
+#:
+#: 2026-09-25 に ``GET /v1/models`` で確かめたところ、日本語（``ja`` / ``ja-JP``）を持つ TTS は
+#: Aura-2 の 5 声（``aura-2-ama-ja`` / ``ebisu`` / ``fujin`` / ``izanami`` / ``uzume``）だけだった。
+#: B の声（Jessica）と同じ女性で、用途の札（会話・窓口・面接・IVR）が一番広い Izanami にしている。
+DEFAULT_DEEPGRAM_TTS_MODEL = 'aura-2-izanami-ja'
 
 
 class ConfigError(RuntimeError):

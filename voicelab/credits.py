@@ -97,6 +97,80 @@ def consumed(before: CreditsSnapshot, after: CreditsSnapshot) -> int:
     return max(after.used - before.used, 0)
 
 
+# --------------------------------------------------------------------------- Deepgram（D）
+
+DEEPGRAM_API_BASE = 'https://api.deepgram.com/v1'
+
+
+@dataclass(frozen=True)
+class DeepgramBalance:
+    """Deepgram の残高（ドル）。ElevenLabs のクレジットとは別勘定。
+
+    :ivar amount: 全 balance の合計。``balances`` が空配列なら 0（**残高なし**）。
+    :ivar units: 単位（``usd``）。空配列のときは ``usd`` とみなす。
+    :ivar entries: balance の件数。0 なら「残高なし」と表示する。
+    """
+
+    amount: float
+    units: str
+    entries: int
+
+    def describe(self) -> str:
+        """人が読む 1 行。"""
+        if self.entries == 0:
+            return 'Deepgram: 残高なし（balances が空。TTS は 402 で断られる）'
+        return f'Deepgram: 残り {self.amount:,.4f} {self.units}'
+
+
+def parse_deepgram_balances(payload: dict) -> DeepgramBalance:
+    """``GET /v1/projects/{id}/balances`` の応答を読む純粋関数。
+
+    応答は ``{"balances": [{"amount": 199.9, "units": "usd", ...}]}``。
+    **空配列は異常ではなく「残高なし」**（無料枠が失効するとこうなる。2026-09-25 に実測）。
+
+    :raises CreditsError: 必要な項目が無い。
+    """
+    try:
+        balances = payload['balances']
+        amount = sum(float(item['amount']) for item in balances)
+        units = str(balances[0].get('units', 'usd')) if balances else 'usd'
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CreditsError('Deepgram の残高の応答に必要な項目がありません') from exc
+    return DeepgramBalance(amount=amount, units=units, entries=len(balances))
+
+
+def read_deepgram_balance(api_key: str) -> DeepgramBalance:
+    """Deepgram の残高を 1 回読む（課金なし）。先頭のプロジェクトを見る。
+
+    鍵に ``billing:read`` の権限が無いと ``/balances`` は **403** を返す。呼び出し側
+    （``cli``）はこの :class:`CreditsError` を 1 行の注意として出して先へ進む。
+    D の計測は残高を止まる条件にしていないので、読めなくても困らない。
+
+    :raises CreditsError: 2xx 以外、接続失敗、または応答の形が違う。
+    """
+    headers = {'Authorization': f'Token {api_key}', 'accept': 'application/json'}
+    try:
+        with httpx.Client(headers=headers, timeout=TIMEOUT_SECONDS) as client:
+            projects = client.get(f'{DEEPGRAM_API_BASE}/projects')
+            projects.raise_for_status()
+            items = projects.json().get('projects') or []
+            if not items:
+                raise CreditsError('Deepgram のプロジェクトが見つかりません')
+            project_id = items[0]['project_id']
+            response = client.get(f'{DEEPGRAM_API_BASE}/projects/{project_id}/balances')
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        hint = '。鍵に billing:read の権限が無い' if status == 403 else ''
+        raise CreditsError(f'Deepgram が HTTP {status} を返しました{hint}') from exc
+    except httpx.HTTPError as exc:
+        raise CreditsError('Deepgram に接続できませんでした') from exc
+    except (KeyError, ValueError) as exc:
+        raise CreditsError('Deepgram の応答が想定の形ではありません') from exc
+    return parse_deepgram_balances(payload)
+
+
 if __name__ == '__main__':
     # python -m voicelab.credits
     # config をここで import するのは、この module 自体を .env に依存させないため

@@ -6,4 +6,5 @@ __pycache__/
 *.mp3
 *.egg-info/
 results/audio/
+results/*/*/audio/
 .pytest_cache/
